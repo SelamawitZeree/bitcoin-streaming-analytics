@@ -1,0 +1,62 @@
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: product-stock-service # Replace with your ECR repository name
+  EKS_CLUSTER_NAME: my-eks-cluster # Replace with your EKS cluster name
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # This is required for requesting the OIDC ID token
+      contents: read # This is required for actions/checkout
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build Spring Boot application
+        run: mvn clean package -DskipTests
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/github-actions-eks-role # Replace with your IAM Role ARN
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update Kubeconfig for EKS
+        uses: aws-actions/amazon-eks-set-kubeconfig@v2
+        with:
+          cluster-name: ${{ env.EKS_CLUSTER_NAME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy application to EKS
+        run: |
+          # Replace the image in the deployment.yaml with the newly built image
+          sed -i "s|<YOUR_ECR_REPO_URL>/product-stock-service:latest|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" kubernetes/deployment.yaml
+          kubectl apply -f kubernetes/deployment.yaml

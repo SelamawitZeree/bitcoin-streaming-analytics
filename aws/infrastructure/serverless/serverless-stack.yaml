@@ -1,0 +1,394 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Serverless microservices with Lambda, API Gateway, and Cognito'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-user-pool'
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: !Sub '${Environment}-client'
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      SupportedIdentityProviders: [COGNITO]
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${Environment}-ms-${AWS::AccountId}'
+      UserPoolId: !Ref CognitoUserPool
+
+  CustomerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-customer-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: CognitoAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt CognitoUserPool.Arn
+
+  CustomerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-customer-service'
+      Runtime: java17
+      Handler: cs590.project.customer.CustomerHandler
+      Role: !GetAtt CustomerLambdaRole.Arn
+      Code:
+        S3Bucket: !Sub '${Environment}-lambda-code-${AWS::AccountId}'
+        S3Key: customer-service.jar
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+          COGNITO_CLIENT_ID: !Ref CognitoUserPoolClient
+          SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}'
+      TracingConfig:
+        Mode: Active
+
+  StockDecrementQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-stock-decrement-queue'
+      VisibilityTimeout: 300
+
+  ProductTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-products'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: productId
+          AttributeType: S
+        - AttributeName: name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: productId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: name-index
+          KeySchema:
+            - AttributeName: name
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  OrderLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-order-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !GetAtt StockDecrementQueue.Arn
+
+  OrderLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: ProductApi
+    Properties:
+      FunctionName: !Sub '${Environment}-order-service'
+      Runtime: java17
+      Handler: cs590.project.order.OrderHandler
+      Role: !GetAtt OrderLambdaRole.Arn
+      Code:
+        S3Bucket: !Sub '${Environment}-lambda-code-${AWS::AccountId}'
+        S3Key: order-service.jar
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref StockDecrementQueue
+      TracingConfig:
+        Mode: Active
+      Timeout: 60
+      MemorySize: 512
+
+  ProductLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-product-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt ProductTable.Arn
+                  - !Sub '${ProductTable.Arn}/index/*'
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt StockDecrementQueue.Arn
+
+  ProductLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-product-service'
+      Runtime: java17
+      Handler: cs590.project.product.ProductHandler
+      Role: !GetAtt ProductLambdaRole.Arn
+      Code:
+        S3Bucket: !Sub '${Environment}-lambda-code-${AWS::AccountId}'
+        S3Key: product-service.jar
+      Environment:
+        Variables:
+          PRODUCT_TABLE_NAME: !Ref ProductTable
+          SQS_QUEUE_URL: !Ref StockDecrementQueue
+      TracingConfig:
+        Mode: Active
+      Timeout: 60
+      MemorySize: 512
+
+  ProductSQSEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    DependsOn: ProductLambda
+    Properties:
+      EventSourceArn: !GetAtt StockDecrementQueue.Arn
+      FunctionName: !Ref ProductLambda
+      BatchSize: 10
+
+  CustomerApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${Environment}-customer-api'
+      Description: Customer service API with Cognito authentication
+
+  CustomerApiAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      RestApiId: !Ref CustomerApi
+      Type: COGNITO_USER_POOLS
+      ProviderARNs:
+        - !GetAtt CognitoUserPool.Arn
+      IdentitySource: method.request.header.Authorization
+
+  CustomerApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref CustomerApi
+      ParentId: !GetAtt CustomerApi.RootResourceId
+      PathPart: customer
+
+  CustomerApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref CustomerApi
+      ResourceId: !Ref CustomerApiResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CustomerApiAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CustomerLambda.Arn}/invocations'
+
+  CustomerApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: CustomerApiMethod
+    Properties:
+      RestApiId: !Ref CustomerApi
+      StageName: !Sub '${Environment}'
+
+  CustomerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CustomerLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CustomerApi}/*/*'
+
+  OrderApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${Environment}-order-api'
+
+  OrderApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrderApi
+      ParentId: !GetAtt OrderApi.RootResourceId
+      PathPart: orders
+
+  OrderApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrderApi
+      ResourceId: !Ref OrderApiResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OrderLambda.Arn}/invocations'
+
+  OrderApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: OrderApiMethod
+    Properties:
+      RestApiId: !Ref OrderApi
+      StageName: !Sub '${Environment}'
+
+  OrderLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OrderLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrderApi}/*/*'
+
+  ProductApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${Environment}-product-api'
+
+  ProductApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ProductApi
+      ParentId: !GetAtt ProductApi.RootResourceId
+      PathPart: products
+
+  ProductApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ProductApi
+      ResourceId: !Ref ProductApiResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ProductLambda.Arn}/invocations'
+
+  ProductApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ProductApiMethod
+    Properties:
+      RestApiId: !Ref ProductApi
+      StageName: !Sub '${Environment}'
+
+  ProductLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProductLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ProductApi}/*/*'
+
+Outputs:
+  CognitoUserPoolId:
+    Value: !Ref CognitoUserPool
+    Description: Cognito User Pool ID
+
+  CognitoClientId:
+    Value: !Ref CognitoUserPoolClient
+    Description: Cognito Client ID
+
+  CognitoHostedUIUrl:
+    Value: !Sub 'https://${CognitoUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${CognitoUserPoolClient}&response_type=code&redirect_uri=https://example.com/callback'
+    Description: Cognito Hosted UI Login URL
+
+  CustomerApiUrl:
+    Value: !Sub 'https://${CustomerApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/customer'
+    Description: Customer API Gateway URL (requires Cognito authentication)
+
+  OrderApiUrl:
+    Value: !Sub 'https://${OrderApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/orders'
+    Description: Order API Gateway URL
+
+  ProductApiUrl:
+    Value: !Sub 'https://${ProductApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/products'
+    Description: Product API Gateway URL
+
+  SQSQueueUrl:
+    Value: !Ref StockDecrementQueue
+    Description: SQS Queue URL for stock decrement messages
+
+  LambdaCodeBucket:
+    Value: !Sub '${Environment}-lambda-code-${AWS::AccountId}'
+    Description: S3 Bucket for Lambda deployment packages
+

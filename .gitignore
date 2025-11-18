@@ -1,0 +1,40 @@
+# Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.original
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS
+.aws-sam/
+samconfig.toml
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+**/target/
+**/.mvn/
+.mvn/wrapper/maven-wrapper.jar
+
