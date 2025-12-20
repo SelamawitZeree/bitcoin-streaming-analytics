@@ -1,67 +1,44 @@
-# Compiled files
+# Maven
+target/
 *.class
 *.jar
 *.war
 *.ear
-*.pyc
-__pycache__/
-*.py[cod]
-*$py.class
+*.original
 
-# Build directories
-target/
-build/
-dist/
-*.egg-info/
-
-# IDE files
+# IDE
 .idea/
-.vscode/
 *.iml
+.vscode/
+.classpath
+.project
+.settings/
 *.swp
 *.swo
 *~
 
-# Logs
-*.log
-/tmp/
-logs/
-
-# OS files
+# OS
 .DS_Store
 Thumbs.db
 
-# Spark
-.metastore_db/
-derby.log
-spark-warehouse/
+# Logs
+*.log
+logs/
+/tmp/*.log
 
-# Hive
-hive.log
+# Environment
+.env
+.env.local
 
-# Kafka
-kafka-logs/
-zookeeper/
+# Build artifacts
+**/target/
+**/.mvn/
+.mvn/wrapper/maven-wrapper.jar
 
-# Temporary files
-*.tmp
-*.bak
-*.backup
-
-# Evidence folder videos (keep screenshots)
-evidence/*.mov
-evidence/*.mp4
-evidence/*.avi
-
-# Unrelated project files (CS590)
-aws/
-customer/
-order/
-product/
-shoppingcart/
-stock/
-ARCHITECTURE_*.md
-DIAGRAMGPT_PROMPT.md
-SERVERLESS_*.md
-SERVER_BASED_*.md
-VPC_*.md
+# Keep evidence folder structure but ignore screenshots until ready
+evidence/**/*.png
+evidence/**/*.jpg
+evidence/**/*.jpeg
+!evidence/.gitkeep
+!evidence/final/.gitkeep
+!evidence/final/README.txt
