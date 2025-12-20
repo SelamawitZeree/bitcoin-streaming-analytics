@@ -35,64 +35,89 @@ Real-time Bitcoin cryptocurrency price streaming pipeline using Kafka, Spark Str
 - Maven (for building)
 - Java 8
 
-## Quick Start
-
-### Step 0: Health Check
-```bash
-chmod +x scripts/*.sh
-./scripts/99_healthcheck.sh
-```
+## Project Flow
 
 ### Step 1: Start Services
+
+**Start Zookeeper:**
 ```bash
-source scripts/00_env.sh
-./scripts/01_start_zookeeper.sh
-./scripts/02_start_kafka.sh
-./scripts/03_create_topic.sh
+cd /home/cloudera/kafka_2.11-0.10.2.2
+nohup bin/zookeeper-server-start.sh config/zookeeper.properties > /tmp/zookeeper.log 2>&1 &
 ```
 
-### Step 2: Run Pipeline
-
-**Terminal 1 - Producer (continuous):**
+**Start Kafka:**
 ```bash
-./scripts/04_produce_bitcoin_messages.sh
+cd /home/cloudera/kafka_2.11-0.10.2.2
+nohup bin/kafka-server-start.sh config/server.properties > /tmp/kafka.log 2>&1 &
+```
+
+**Create Topic:**
+```bash
+cd /home/cloudera/kafka_2.11-0.10.2.2
+bin/kafka-topics.sh --create --topic project_stream --zookeeper localhost:2181 --partitions 1 --replication-factor 1
+```
+
+### Step 2: Build Project
+
+```bash
+mvn clean package
+```
+
+### Step 3: Prepare HDFS
+
+```bash
+hdfs dfs -mkdir -p /user/cloudera/project_stream_out
+hdfs dfs -mkdir -p /user/cloudera/project_stream_ckpt
+hdfs dfs -chmod 777 /user/cloudera/project_stream_out
+hdfs dfs -chmod 777 /user/cloudera/project_stream_ckpt
+```
+
+### Step 4: Run Pipeline
+
+**Terminal 1 - Producer:**
+```bash
+java -cp target/FinalProject-1.0.0-jar-with-dependencies.jar \
+    cs523.FinalProject.ProjKafkaBitcoinProducer
 ```
 
 **Terminal 2 - Spark Streaming:**
 ```bash
-./scripts/05_run_spark_stream.sh
+spark2-submit \
+    --class cs523.FinalProject.ProjSparkSQLKafkaStream \
+    --master local[*] \
+    --packages org.apache.spark:spark-sql-kafka-0-10_2.11:2.4.0 \
+    target/FinalProject-1.0.0-jar-with-dependencies.jar
 ```
 
-**Wait 2-3 minutes for Spark to process windows, then:**
-
-**Terminal 3 - Verify HDFS:**
+**Note:** If `--packages` fails (no internet), use:
 ```bash
-./scripts/06_verify_hdfs.sh
+spark2-submit \
+    --class cs523.FinalProject.ProjSparkSQLKafkaStream \
+    --master local[*] \
+    --jars /usr/lib/spark/jars/spark-sql-kafka-0-10_2.11-2.4.0.jar \
+    target/FinalProject-1.0.0-jar-with-dependencies.jar
+```
+
+**Terminal 3 - Verify HDFS (after 2-3 minutes):**
+```bash
+hdfs dfs -ls /user/cloudera/project_stream_out
+hdfs dfs -cat /user/cloudera/project_stream_out/part-* | head -10
 ```
 
 **Terminal 4 - Hive Queries:**
 ```bash
-./scripts/07_run_hive.sh
+hive -f hive/01_create_table.hql
+hive -f hive/02_queries.hql
 ```
 
 ## Project Structure
 
 ```
 .
-├── src/
+├── src/main/java/cs523/FinalProject/
 │   ├── ProjKafkaBitcoinProducer.java    # Kafka producer
 │   ├── ProjSparkSQLKafkaStream.java     # Spark streaming consumer
 │   └── ProjSparkSQLProcess.java         # Hive queries via Spark SQL
-├── scripts/
-│   ├── 00_env.sh                        # Environment setup
-│   ├── 01_start_zookeeper.sh
-│   ├── 02_start_kafka.sh
-│   ├── 03_create_topic.sh
-│   ├── 04_produce_bitcoin_messages.sh
-│   ├── 05_run_spark_stream.sh
-│   ├── 06_verify_hdfs.sh
-│   ├── 07_run_hive.sh
-│   └── 99_healthcheck.sh                # Environment check
 ├── hive/
 │   ├── 01_create_table.hql              # Create Hive table
 │   └── 02_queries.hql                   # Analysis queries
@@ -118,66 +143,6 @@ source scripts/00_env.sh
 2025-12-19 15:00:00,2025-12-19 15:01:00,ETH,2451.20,2450.50,2452.80,3
 ```
 
-## Manual Run Commands
-
-### Build
-```bash
-mvn clean package
-```
-
-### Producer
-```bash
-java -cp target/FinalProject-1.0.0-jar-with-dependencies.jar \
-    cs523.FinalProject.ProjKafkaBitcoinProducer
-```
-
-### Spark Streaming
-```bash
-spark2-submit \
-    --class cs523.FinalProject.ProjSparkSQLKafkaStream \
-    --master local[*] \
-    --packages org.apache.spark:spark-sql-kafka-0-10_2.11:2.4.0 \
-    target/FinalProject-1.0.0-jar-with-dependencies.jar
-```
-
-**Note:** If `--packages` fails (no internet), manually add the Kafka connector jar:
-- Download: `spark-sql-kafka-0-10_2.11-2.4.0.jar`
-- Use: `--jars /path/to/spark-sql-kafka-0-10_2.11-2.4.0.jar`
-
-### Spark SQL Hive
-```bash
-spark2-submit \
-    --class cs523.FinalProject.ProjSparkSQLProcess \
-    --master local[*] \
-    target/FinalProject-1.0.0-jar-with-dependencies.jar
-```
-
-## Screenshots Checklist
-
-Save screenshots in `evidence/final/`:
-
-1. **kafka_topic_list.png** - Output from `kafka-topics.sh --list`
-2. **kafka_topic_describe.png** - Output from `kafka-topics.sh --describe --topic project_stream`
-3. **producer_running.png** - Terminal showing producer sending messages
-4. **spark_streaming_running.png** - Spark job console output (showing batches)
-5. **hdfs_file_listing.png** - Output from `hdfs dfs -ls /user/cloudera/project_stream_out`
-6. **hdfs_sample_data.png** - Sample CSV rows from HDFS (`hdfs dfs -cat ... | head -5`)
-7. **hive_table_created.png** - Hive table creation success message
-8. **hive_query1_count.png** - Total count query result
-9. **hive_query2_groupby.png** - Group by symbol query result
-10. **hive_query3_top10.png** - Top 10 symbols query result
-
-## Demo Video Flow (8-10 minutes)
-
-1. **Introduction (30s)** - Project overview, architecture diagram
-2. **Environment Setup (1m)** - Show healthcheck script, verify ports
-3. **Start Services (1m)** - Zookeeper, Kafka, create topic (show topic list)
-4. **Start Producer (30s)** - Show producer sending messages
-5. **Start Spark Streaming (1m)** - Show Spark job starting, processing batches
-6. **Verify HDFS (1m)** - Show HDFS files, sample data (NO header row)
-7. **Hive Integration (2m)** - Create table, run queries, show results
-8. **Summary (30s)** - Pipeline flow, key features
-
 ## Troubleshooting
 
 **Kafka not starting:**
@@ -186,9 +151,9 @@ Save screenshots in `evidence/final/`:
 - Check logs: `/tmp/zookeeper.log`, `/tmp/kafka.log`
 
 **Spark can't find Kafka connector:**
-- Run healthcheck: `./scripts/99_healthcheck.sh`
 - If no internet, download jar manually and use `--jars` option
 - Check Spark version: `spark2-submit --version`
+- Common location: `/usr/lib/spark/jars/spark-sql-kafka-0-10_2.11-2.4.0.jar`
 
 **Hive table empty:**
 - Verify HDFS has files: `hdfs dfs -ls /user/cloudera/project_stream_out`
@@ -202,10 +167,9 @@ Save screenshots in `evidence/final/`:
 
 ## Authors
 
-Selamawit Zeree
+Selamawit Zeree  
 Yordanos [Last Name]
 
-Course: CS599 Big Data Technology
-Professor: Mrudula Mukadam
+Course: CS599 Big Data Technology  
+Professor: Mrudula Mukadam  
 Maharishi International University
-
